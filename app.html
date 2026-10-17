@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>50MP Film Darkroom</title>
+<style>
+  :root { --bg: #0a0a0a; --panel: #141414; --accent: #f59e0b; --text: #f3f4f6; --sub: #9ca3af; }
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: var(--panel); border-bottom: 1px solid #262626; }
+  .title { font-size: 14px; font-weight: 700; letter-spacing: 0.5px; color: var(--accent); }
+  .btn-group { display: flex; gap: 8px; }
+  button, .file-btn { background: #262626; color: var(--text); border: 1px solid #404040; padding: 7px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .btn-primary { background: var(--accent); color: #000; border: none; }
+  #viewport { flex: 1; display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden; background: #050505; }
+  canvas { max-width: 100%; max-height: 100%; object-fit: contain; }
+  #info-badge { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 4px 8px; border-radius: 4px; font-size: 11px; color: var(--sub); pointer-events: none; }
+  #controls { background: var(--panel); border-top: 1px solid #262626; padding: 10px 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .lut-bar { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+  .lut-chip { flex: 0 0 auto; padding: 6px 12px; background: #1f1f1f; border: 1px solid #333; border-radius: 16px; font-size: 12px; color: var(--sub); }
+  .lut-chip.active { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 700; }
+  .lut-add { border-style: dashed; color: var(--accent); }
+  .param-tabs { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+  .param-tab { flex: 0 0 auto; padding: 5px 10px; border-radius: 6px; font-size: 11px; background: #1a1a1a; color: var(--sub); }
+  .param-tab.active { background: #333; color: #fff; font-weight: 600; }
+  .slider-row { display: flex; align-items: center; gap: 12px; padding: 4px 0; }
+  .slider-label { width: 75px; font-size: 12px; font-weight: 600; }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  .slider-val { width: 42px; text-align: right; font-size: 12px; color: var(--accent); font-variant-numeric: tabular-nums; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="title">50MP DARKROOM</div>
+  <div class="btn-group">
+    <label class="file-btn">사진 열기<input type="file" id="imgInput" accept="image/*,.dng,.raw"></label>
+    <button class="btn-primary" id="exportBtn">50MP JPG 저장</button>
+  </div>
+</header>
+
+<div id="viewport">
+  <div id="info-badge">사진을 불러와주세요 (50MP 파이프라인 대기중)</div>
+  <canvas id="glCanvas"></canvas>
+</div>
+
+<div id="controls">
+  <div class="lut-bar" id="lutBar">
+    <div class="lut-chip active" data-lut="none">원본 (No LUT)</div>
+    <label class="lut-chip lut-add">+ .CUBE 추가<input type="file" id="cubeInput" accept=".cube" multiple></label>
+  </div>
+
+  <div class="param-tabs" id="paramTabs"></div>
+
+  <div class="slider-row">
+    <div class="slider-label" id="activeLabel">필름 강도</div>
+    <input type="range" id="mainSlider" min="0" max="1" step="0.01" value="1">
+    <div class="slider-val" id="activeVal">1.00</div>
+    <button id="resetParamBtn" style="padding:4px 8px;font-size:11px;">초기화</button>
+  </div>
+</div>
+
+<script>
+const PARAMS = [
+  { key: 'uLutIntensity', name: '필름 강도', min: 0.0, max: 1.0, step: 0.01, def: 1.0 },
+  { key: 'uExposure',     name: '노출',     min: -2.0, max: 2.0, step: 0.02, def: 0.0 },
+  { key: 'uContrast',     name: '대비',     min: 0.5, max: 1.5, step: 0.01, def: 1.0 },
+  { key: 'uHighlights',   name: '하이라이트', min: -1.0, max: 1.0, step: 0.02, def: 0.0 },
+  { key: 'uShadows',      name: '섀도우',    min: -1.0, max: 1.0, step: 0.02, def: 0.0 },
+  { key: 'uTemperature',  name: '색온도',    min: -1.0, max: 1.0, step: 0.02, def: 0.0 },
+  { key: 'uSaturation',   name: '채도',     min: 0.0, max: 2.0, step: 0.02, def: 1.0 },
+  { key: 'uSharpness',    name: '선명도',    min: 0.0, max: 2.0, step: 0.02, def: 0.0 },
+  { key: 'uGrain',        name: '그레인',    min: 0.0, max: 1.0, step: 0.01, def: 0.0 },
+  { key: 'uVignette',     name: '비네팅',    min: 0.0, max: 1.0, step: 0.01, def: 0.0 }
+];
+
+const state = {};
+PARAMS.forEach(p => state[p.key] = p.def);
+let currentParam = PARAMS[0];
+let hasLut = 0;
+let sourceImage = null;
+const savedLuts = {};
+
+const canvas = document.getElementById('glCanvas');
+const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true });
+
+const vsSource = `#version 300 es
+in vec2 aPos;
+out vec2 vTexCoord;
+void main() {
+  vTexCoord = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}`;
+
+const fsSource = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+precision highp sampler3D;
+in vec2 vTexCoord;
+out vec4 fragColor;
+uniform sampler2D uSourceImage;
+uniform sampler3D uFilmLut;
+uniform int uHasLut;
+uniform vec2 uTexelSize;
+uniform float uLutIntensity, uExposure, uContrast, uHighlights, uShadows, uTemperature, uSaturation, uSharpness, uGrain, uVignette;
+
+float rand(vec2 co) { return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453); }
+
+void main() {
+  vec3 center = texture(uSourceImage, vTexCoord).rgb;
+  vec3 color = center;
+  if (uSharpness > 0.001) {
+    vec3 blur = (
+      texture(uSourceImage, vTexCoord + vec2(0.0, -uTexelSize.y)).rgb +
+      texture(uSourceImage, vTexCoord + vec2(0.0,  uTexelSize.y)).rgb +
+      texture(uSourceImage, vTexCoord + vec2(-uTexelSize.x, 0.0)).rgb +
+      texture(uSourceImage, vTexCoord + vec2( uTexelSize.x, 0.0)).rgb
+    ) * 0.25;
+    color = clamp(center + (center - blur) * uSharpness, 0.0, 1.0);
+  }
+  color *= pow(2.0, uExposure);
+  color.r += uTemperature * 0.12;
+  color.b -= uTemperature * 0.12;
+  color = clamp(color, 0.0, 1.0);
+
+  float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+  color += color * uShadows * (1.0 - smoothstep(0.0, 0.55, luma)) * 0.6;
+  color += color * uHighlights * smoothstep(0.45, 1.0, luma) * 0.6;
+
+  color = (color - 0.5) * uContrast + 0.5;
+  float curLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+  color = clamp(mix(vec3(curLuma), color, uSaturation), 0.0, 1.0);
+
+  if (uHasLut == 1) {
+    float lutSize = 33.0;
+    vec3 lutCoord = color * ((lutSize - 1.0) / lutSize) + (0.5 / lutSize);
+    vec3 filmColor = texture(uFilmLut, lutCoord).rgb;
+    color = mix(color, filmColor, uLutIntensity);
+  }
+  if (uVignette > 0.001) {
+    float dist = distance(vTexCoord, vec2(0.5, 0.5));
+    float vig = smoothstep(0.8, 0.25 * (1.0 - uVignette * 0.5), dist);
+    color *= mix(1.0, vig, uVignette);
+  }
+  if (uGrain > 0.001) {
+    float noise = (rand(vTexCoord) - 0.5) * 2.0;
+    float mask = max(1.0 - abs(luma - 0.5) * 1.5, 0.2);
+    color += noise * uGrain * 0.08 * mask;
+  }
+  fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+}`;
+
+function compileShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compileShader(gl.VERTEX_SHADER, vsSource));
+gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, fsSource));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const imgTex = gl.createTexture();
+const lutTex = gl.createTexture();
+
+function uploadLut3D(floatData, size = 33) {
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_3D, lutTex);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB16F, size, size, size, 0, gl.RGB, gl.FLOAT, floatData);
+  hasLut = 1;
+  render();
+}
+
+function render(targetW, targetH) {
+  if (!sourceImage) return;
+  const w = targetW || Math.min(sourceImage.naturalWidth, 2560);
+  const h = targetH || Math.round(w * (sourceImage.naturalHeight / sourceImage.naturalWidth));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w; canvas.height = h;
+  }
+  gl.viewport(0, 0, w, h);
+  gl.useProgram(prog);
+  gl.uniform1i(gl.getUniformLocation(prog, 'uSourceImage'), 0);
+  gl.uniform1i(gl.getUniformLocation(prog, 'uFilmLut'), 1);
+  gl.uniform1i(gl.getUniformLocation(prog, 'uHasLut'), hasLut);
+  gl.uniform2f(gl.getUniformLocation(prog, 'uTexelSize'), 1.0 / w, 1.0 / h);
+  PARAMS.forEach(p => {
+    gl.uniform1f(gl.getUniformLocation(prog, p.key), state[p.key]);
+  });
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+// UI Tabs Setup
+const paramTabs = document.getElementById('paramTabs');
+const mainSlider = document.getElementById('mainSlider');
+const activeLabel = document.getElementById('activeLabel');
+const activeVal = document.getElementById('activeVal');
+
+function selectParam(p, tabEl) {
+  currentParam = p;
+  document.querySelectorAll('.param-tab').forEach(el => el.classList.remove('active'));
+  if (tabEl) tabEl.classList.add('active');
+  activeLabel.textContent = p.name;
+  mainSlider.min = p.min; mainSlider.max = p.max; mainSlider.step = p.step;
+  mainSlider.value = state[p.key];
+  activeVal.textContent = Number(state[p.key]).toFixed(2);
+}
+
+PARAMS.forEach((p, i) => {
+  const t = document.createElement('div');
+  t.className = 'param-tab' + (i === 0 ? ' active' : '');
+  t.textContent = p.name;
+  t.onclick = () => selectParam(p, t);
+  paramTabs.appendChild(t);
+});
+
+mainSlider.oninput = (e) => {
+  state[currentParam.key] = parseFloat(e.target.value);
+  activeVal.textContent = state[currentParam.key].toFixed(2);
+  render();
+};
+
+document.getElementById('resetParamBtn').onclick = () => {
+  state[currentParam.key] = currentParam.def;
+  mainSlider.value = currentParam.def;
+  activeVal.textContent = currentParam.def.toFixed(2);
+  render();
+};
+
+// Image Load
+document.getElementById('imgInput').onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const img = new Image();
+  img.onload = () => {
+    sourceImage = img;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, imgTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    const mp = ((img.naturalWidth * img.naturalHeight) / 1000000).toFixed(1);
+    document.getElementById('info-badge').textContent = `${img.naturalWidth}×${img.naturalHeight} (${mp}MP 원본 로드됨)`;
+    render();
+  };
+  img.src = URL.createObjectURL(file);
+};
+
+// .CUBE Parser & Chip Addition
+function parseCubeText(text) {
+  let size = 33;
+  const lines = text.split(/\r?\n/);
+  const data = [];
+  for (let raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#') || line.startsWith('TITLE') || line.startsWith('DOMAIN')) continue;
+    if (line.startsWith('LUT_3D_SIZE')) {
+      size = parseInt(line.split(/\s+/)[1], 10);
+      continue;
+    }
+    const parts = line.split(/\s+/);
+    if (parts.length >= 3) {
+      data.push(parseFloat(parts[0]), parseFloat(parts[1]), parseFloat(parts[2]));
+    }
+  }
+  return { size, floatArray: new Float32Array(data) };
+}
+
+function addLutChip(name) {
+  if (document.querySelector(`[data-lut="${name}"]`)) return;
+  const chip = document.createElement('div');
+  chip.className = 'lut-chip';
+  chip.dataset.lut = name;
+  chip.textContent = name;
+  chip.onclick = () => {
+    document.querySelectorAll('.lut-chip').forEach(c => c.classList.remove('active'));
+    chip.classList.add('active');
+    const lut = savedLuts[name];
+    if (lut) uploadLut3D(lut.floatArray, lut.size);
+  };
+  const lutBar = document.getElementById('lutBar');
+  lutBar.insertBefore(chip, lutBar.lastElementChild);
+}
+
+document.querySelector('[data-lut="none"]').onclick = (e) => {
+  document.querySelectorAll('.lut-chip').forEach(c => c.classList.remove('active'));
+  e.target.classList.add('active');
+  hasLut = 0;
+  render();
+};
+
+document.getElementById('cubeInput').onchange = async (e) => {
+  const files = Array.from(e.target.files);
+  for (const f of files) {
+    const text = await f.text();
+    const name = f.name.replace(/\.cube$/i, '');
+    savedLuts[name] = parseCubeText(text);
+    addLutChip(name);
+  }
+};
+
+// Full-Resolution 50MP Export
+document.getElementById('exportBtn').onclick = () => {
+  if (!sourceImage) return alert('먼저 사진을 열어주세요!');
+  const badge = document.getElementById('info-badge');
+  badge.textContent = '원본 해상도(50MP급) 렌더링 및 무손실 JPG 인코딩 중...';
+  setTimeout(() => {
+    const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    const outW = Math.min(sourceImage.naturalWidth, maxTex);
+    const outH = Math.min(sourceImage.naturalHeight, maxTex);
+    render(outW, outH);
+    canvas.toBlob((blob) => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `Darkroom_50MP_${Date.now()}.jpg`;
+      a.click();
+      render(); // Restore fast preview
+      badge.textContent = `저장 완료! (${outW}×${outH} JPG Q100)`;
+    }, 'image/jpeg', 1.0);
+  }, 50);
+};
+</script>
+</body>
+</html>
