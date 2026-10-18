@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Film Darkroom</title>
+<style>
+  :root { --bg: #0a0a0a; --panel: #141414; --accent: #f59e0b; --text: #f3f4f6; --sub: #9ca3af; }
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; -webkit-user-select: none; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, sans-serif; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; background: var(--panel); border-bottom: 1px solid #262626; }
+  .title { font-size: 14px; font-weight: 700; letter-spacing: 0.5px; color: var(--accent); }
+  .btn-group { display: flex; gap: 8px; }
+  button, .file-btn { background: #262626; color: var(--text); border: 1px solid #404040; padding: 7px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .btn-primary { background: var(--accent); color: #000; border: none; }
+  #viewport { flex: 1; display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden; background: #050505; }
+  canvas { max-width: 100%; max-height: 100%; object-fit: contain; }
+  #info-badge { position: absolute; top: 10px; left: 10px; right: 10px; background: rgba(0,0,0,0.7); padding: 4px 8px; border-radius: 4px; font-size: 11px; color: var(--sub); pointer-events: none; }
+  #controls { background: var(--panel); border-top: 1px solid #262626; padding: 10px 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .lut-bar { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+  .lut-chip { flex: 0 0 auto; padding: 6px 12px; background: #1f1f1f; border: 1px solid #333; border-radius: 16px; font-size: 12px; color: var(--sub); }
+  .lut-chip.active { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 700; }
+  .lut-add { border-style: dashed; color: var(--accent); }
+  .param-tabs { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+  .param-tab { flex: 0 0 auto; padding: 5px 10px; border-radius: 6px; font-size: 11px; background: #1a1a1a; color: var(--sub); }
+  .param-tab.active { background: #333; color: #fff; font-weight: 600; }
+  .slider-row { display: flex; align-items: center; gap: 12px; padding: 4px 0; }
+  .slider-label { width: 75px; font-size: 12px; font-weight: 600; }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  .slider-val { width: 42px; text-align: right; font-size: 12px; color: var(--accent); font-variant-numeric: tabular-nums; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="title">FILM DARKROOM</div>
+  <div class="btn-group">
+    <label class="file-btn">사진 열기<input type="file" id="imgInput" accept="image/*"></label>
+    <button class="btn-primary" id="exportBtn">원본 크기 저장</button>
+  </div>
+</header>
+
+<div id="viewport">
+  <div id="info-badge">사진을 불러와 주세요 (JPG·PNG·HEIC. RAW/DNG는 열 수 없음)</div>
+  <canvas id="glCanvas"></canvas>
+</div>
+
+<div id="controls">
+  <div class="lut-bar" id="lutBar">
+    <div class="lut-chip active" data-lut="none">원본 (No LUT)</div>
+    <!-- accept 없음: 안드로이드 파일 선택기에서 .cube가 회색으로 막히는 문제 방지 -->
+    <label class="lut-chip lut-add">+ .CUBE 추가<input type="file" id="cubeInput" multiple></label>
+  </div>
+
+  <div class="param-tabs" id="paramTabs"></div>
+
+  <div class="slider-row">
+    <div class="slider-label" id="activeLabel">필름 강도</div>
+    <input type="range" id="mainSlider" min="0" max="1" step="0.01" value="1">
+    <div class="slider-val" id="activeVal">1.00</div>
+    <button id="resetParamBtn" style="padding:4px 8px;font-size:11px;">초기화</button>
+  </div>
+</div>
+
+<script>
+const PARAMS = [
+  { key: 'uLutIntensity', name: '필름 강도', min: 0.0, max: 1.0, step: 0.01, def: 1.0 },
+  { key: 'uExposure',     name: '노출',     min: -2.0, max: 2.0, step: 0.02, def: 0.0 },
+  { key: 'uContrast',     name: '대비',     min: 0.5, max: 1.5, step: 0.01, def: 1.0 },
+  { key: 'uHighlights',   name: '하이라이트', min: -1.0, max: 1.0, step: 0.02, def: 0.0 },
+  { key: 'uShadows',      name: '섀도우',    min: -1.0, max: 1.0, step: 0.02, def: 0.0 },
+  { key: 'uTemperature',  name: '색온도',    min: -1.0, max: 1.0, step: 0.02, def: 0.0 },
+  { key: 'uSaturation',   name: '채도',     min: 0.0, max: 2.0, step: 0.02, def: 1.0 },
+  { key: 'uSharpness',    name: '선명도',    min: 0.0, max: 2.0, step: 0.02, def: 0.0 },
+  { key: 'uGrain',        name: '그레인',    min: 0.0, max: 1.0, step: 0.01, def: 0.0 },
+  { key: 'uVignette',     name: '비네팅',    min: 0.0, max: 1.0, step: 0.01, def: 0.0 }
+];
+
+const state = {};
+PARAMS.forEach(p => state[p.key] = p.def);
+let currentParam = PARAMS[0];
+let hasLut = 0;
+let lutSize = 33;
+let source = null;          // { w, h } of the uploaded texture
+const savedLuts = {};
+const badge = document.getElementById('info-badge');
+
+const canvas = document.getElementById('glCanvas');
+const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true });
+if (!gl) badge.textContent = '이 기기는 WebGL2를 지원하지 않습니다';
+
+const vsSource = `#version 300 es
+in vec2 aPos;
+out vec2 vTexCoord;
+void main() {
+  vTexCoord = vec2(aPos.x * 0.5 + 0.5, 0.5 - aPos.y * 0.5);
+  gl_Position = vec4(aPos, 0.0, 1.0);
+}`;
+
+// 순서: 선명도 → 노출·색온도(장면 조정) → 필름 LUT → 하이라이트·섀도·대비·채도(마무리) → 비네팅 → 그레인(맨 마지막, 한 번만)
+const fsSource = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+precision highp sampler3D;
+in vec2 vTexCoord;
+out vec4 fragColor;
+uniform sampler2D uSourceImage;
+uniform sampler3D uFilmLut;
+uniform int uHasLut;
+uniform float uLutSize;
+uniform vec2 uTexelSize;
+uniform vec2 uOutSize;
+uniform float uLutIntensity, uExposure, uContrast, uHighlights, uShadows, uTemperature, uSaturation, uSharpness, uGrain, uVignette;
+
+float rand(vec2 co) { return fract(sin(dot(co.xy, vec2(12.9898, 78.233))) * 43758.5453); }
+
+void main() {
+  vec3 center = texture(uSourceImage, vTexCoord).rgb;
+  vec3 color = center;
+  if (uSharpness > 0.001) {
+    vec3 blur = (
+      texture(uSourceImage, vTexCoord + vec2(0.0, -uTexelSize.y)).rgb +
+      texture(uSourceImage, vTexCoord + vec2(0.0,  uTexelSize.y)).rgb +
+      texture(uSourceImage, vTexCoord + vec2(-uTexelSize.x, 0.0)).rgb +
+      texture(uSourceImage, vTexCoord + vec2( uTexelSize.x, 0.0)).rgb
+    ) * 0.25;
+    color = clamp(center + (center - blur) * uSharpness, 0.0, 1.0);
+  }
+  color *= pow(2.0, uExposure);
+  color.r += uTemperature * 0.12;
+  color.b -= uTemperature * 0.12;
+  color = clamp(color, 0.0, 1.0);
+
+  if (uHasLut == 1) {
+    vec3 lutCoord = color * ((uLutSize - 1.0) / uLutSize) + (0.5 / uLutSize);
+    vec3 filmColor = texture(uFilmLut, lutCoord).rgb;
+    color = mix(color, filmColor, uLutIntensity);
+  }
+
+  float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+  color += color * uShadows * (1.0 - smoothstep(0.0, 0.55, luma)) * 0.6;
+  color += color * uHighlights * smoothstep(0.45, 1.0, luma) * 0.6;
+  color = (color - 0.5) * uContrast + 0.5;
+  float curLuma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+  color = clamp(mix(vec3(curLuma), color, uSaturation), 0.0, 1.0);
+
+  if (uVignette > 0.001) {
+    float dist = distance(vTexCoord, vec2(0.5, 0.5));
+    float vig = smoothstep(0.8, 0.25 * (1.0 - uVignette * 0.5), dist);
+    color *= mix(1.0, vig, uVignette);
+  }
+  if (uGrain > 0.001) {
+    float noise = (rand(floor(vTexCoord * uOutSize)) - 0.5) * 2.0;
+    float l2 = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    float mask = max(1.0 - abs(l2 - 0.5) * 1.5, 0.2);
+    color += noise * uGrain * 0.08 * mask;
+  }
+  fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+}`;
+
+function compileShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    badge.textContent = '셰이더 오류: ' + gl.getShaderInfoLog(s);
+    console.error(gl.getShaderInfoLog(s));
+  }
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compileShader(gl.VERTEX_SHADER, vsSource));
+gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, fsSource));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) badge.textContent = '프로그램 오류: ' + gl.getProgramInfoLog(prog);
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const imgTex = gl.createTexture();
+const lutTex = gl.createTexture();
+const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+
+function uploadLut3D(floatData, size) {
+  if (floatData.length !== size * size * size * 3) {
+    badge.textContent = `큐브 파일 오류: 값 개수 ${floatData.length / 3}, 필요 ${size ** 3}`;
+    return;
+  }
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_3D, lutTex);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+  gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGB16F, size, size, size, 0, gl.RGB, gl.FLOAT, floatData);
+  lutSize = size;
+  hasLut = 1;
+  render();
+}
+
+function previewSize() {
+  const s = Math.min(1, 2560 / source.w);
+  return [Math.round(source.w * s), Math.round(source.h * s)];
+}
+
+function render(targetW, targetH) {
+  if (!source) return;
+  let [w, h] = targetW ? [targetW, targetH] : previewSize();
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  // 기기가 큰 캔버스를 다 못 만들면 drawingBuffer가 작아짐 → 실제 크기 사용
+  if (gl.drawingBufferWidth !== w || gl.drawingBufferHeight !== h) {
+    canvas.width = gl.drawingBufferWidth; canvas.height = gl.drawingBufferHeight;
+  }
+  w = gl.drawingBufferWidth; h = gl.drawingBufferHeight;
+  gl.viewport(0, 0, w, h);
+  gl.useProgram(prog);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, imgTex);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_3D, lutTex);
+  gl.uniform1i(gl.getUniformLocation(prog, 'uSourceImage'), 0);
+  gl.uniform1i(gl.getUniformLocation(prog, 'uFilmLut'), 1);
+  gl.uniform1i(gl.getUniformLocation(prog, 'uHasLut'), hasLut);
+  gl.uniform1f(gl.getUniformLocation(prog, 'uLutSize'), lutSize);
+  gl.uniform2f(gl.getUniformLocation(prog, 'uTexelSize'), 1.0 / source.w, 1.0 / source.h);
+  gl.uniform2f(gl.getUniformLocation(prog, 'uOutSize'), w, h);
+  PARAMS.forEach(p => gl.uniform1f(gl.getUniformLocation(prog, p.key), state[p.key]));
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  return [w, h];
+}
+
+// UI
+const paramTabs = document.getElementById('paramTabs');
+const mainSlider = document.getElementById('mainSlider');
+const activeLabel = document.getElementById('activeLabel');
+const activeVal = document.getElementById('activeVal');
+
+function selectParam(p, tabEl) {
+  currentParam = p;
+  document.querySelectorAll('.param-tab').forEach(el => el.classList.remove('active'));
+  if (tabEl) tabEl.classList.add('active');
+  activeLabel.textContent = p.name;
+  mainSlider.min = p.min; mainSlider.max = p.max; mainSlider.step = p.step;
+  mainSlider.value = state[p.key];
+  activeVal.textContent = Number(state[p.key]).toFixed(2);
+}
+PARAMS.forEach((p, i) => {
+  const t = document.createElement('div');
+  t.className = 'param-tab' + (i === 0 ? ' active' : '');
+  t.textContent = p.name;
+  t.onclick = () => selectParam(p, t);
+  paramTabs.appendChild(t);
+});
+mainSlider.oninput = (e) => {
+  state[currentParam.key] = parseFloat(e.target.value);
+  activeVal.textContent = state[currentParam.key].toFixed(2);
+  render();
+};
+document.getElementById('resetParamBtn').onclick = () => {
+  state[currentParam.key] = currentParam.def;
+  mainSlider.value = currentParam.def;
+  activeVal.textContent = currentParam.def.toFixed(2);
+  render();
+};
+
+// 사진 열기 (기기 한계보다 크면 비율 유지하며 줄여서 올림)
+document.getElementById('imgInput').onchange = async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  badge.textContent = '불러오는 중...';
+  try {
+    let bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    const ow = bmp.width, oh = bmp.height;
+    const s = Math.min(1, maxTex / ow, maxTex / oh);
+    if (s < 1) bmp = await createImageBitmap(file, { imageOrientation: 'from-image', resizeWidth: Math.floor(ow * s), resizeHeight: Math.floor(oh * s), resizeQuality: 'high' });
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, imgTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
+    source = { w: bmp.width, h: bmp.height };
+    const mp = (ow * oh / 1e6).toFixed(1);
+    badge.textContent = `${ow}×${oh} (${mp}MP)` + (s < 1 ? ` → 기기 한계로 ${bmp.width}×${bmp.height}` : '') + ` · 텍스처 한계 ${maxTex}`;
+    render();
+  } catch (err) {
+    badge.textContent = '이 파일은 열 수 없습니다 (RAW/DNG는 미지원): ' + err;
+  }
+};
+
+// .cube
+function parseCubeText(text) {
+  let size = 0;
+  const data = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (line.startsWith('LUT_3D_SIZE')) { size = parseInt(line.split(/\s+/)[1], 10); continue; }
+    if (/^[A-Za-z]/.test(line)) continue;              // TITLE, DOMAIN_MIN/MAX, LUT_1D_SIZE 등
+    const parts = line.split(/\s+/);
+    if (parts.length >= 3) data.push(+parts[0], +parts[1], +parts[2]);
+  }
+  return { size: size || Math.round(Math.cbrt(data.length / 3)), floatArray: new Float32Array(data) };
+}
+function selectChip(chip) {
+  document.querySelectorAll('.lut-chip').forEach(c => c.classList.remove('active'));
+  chip.classList.add('active');
+}
+function addLutChip(name) {
+  if (document.querySelector(`[data-lut="${CSS.escape(name)}"]`)) return;
+  const chip = document.createElement('div');
+  chip.className = 'lut-chip';
+  chip.dataset.lut = name;
+  chip.textContent = name;
+  chip.onclick = () => { selectChip(chip); const l = savedLuts[name]; if (l) uploadLut3D(l.floatArray, l.size); };
+  const lutBar = document.getElementById('lutBar');
+  lutBar.insertBefore(chip, lutBar.lastElementChild);
+}
+document.querySelector('[data-lut="none"]').onclick = (e) => { selectChip(e.currentTarget); hasLut = 0; render(); };
+document.getElementById('cubeInput').onchange = async (e) => {
+  for (const f of Array.from(e.target.files)) {
+    if (!/\.cube$/i.test(f.name)) { badge.textContent = `.cube 파일이 아닙니다: ${f.name}`; continue; }
+    const name = f.name.replace(/\.cube$/i, '');
+    savedLuts[name] = parseCubeText(await f.text());
+    addLutChip(name);
+  }
+  e.target.value = '';
+};
+
+// 저장: 앱(APK)에서는 AndroidBridge로 갤러리(Pictures/Darkroom)에 저장, 브라우저에서는 다운로드
+async function saveBlob(blob, name) {
+  if (window.AndroidBridge) {
+    const dataUrl = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
+    const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+    const CH = 1 << 20;                                   // 1MB씩 (4의 배수)
+    AndroidBridge.begin(name);
+    for (let i = 0; i < b64.length; i += CH) AndroidBridge.append(b64.slice(i, i + CH));
+    return AndroidBridge.finish();                         // 저장 경로 또는 'ERROR: ...'
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  return '다운로드 폴더';
+}
+
+document.getElementById('exportBtn').onclick = () => {
+  if (!source) { badge.textContent = '먼저 사진을 열어 주세요'; return; }
+  badge.textContent = '원본 크기로 렌더링 중...';
+  setTimeout(() => {
+    const [w, h] = render(source.w, source.h);
+    canvas.toBlob(async (blob) => {
+      const name = `Darkroom_${Date.now()}.jpg`;
+      const where = await saveBlob(blob, name);
+      render();
+      const note = (w !== source.w || h !== source.h) ? ` (기기 한계로 ${w}×${h})` : '';
+      badge.textContent = String(where).startsWith('ERROR') ? `저장 실패: ${where}` : `저장 완료: ${w}×${h}${note} → ${where}`;
+    }, 'image/jpeg', 0.95);
+  }, 50);
+};
+</script>
+</body>
+</html>
